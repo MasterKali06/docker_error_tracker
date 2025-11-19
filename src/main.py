@@ -1,6 +1,7 @@
 import atexit
 import logging
 import sys
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
@@ -18,10 +19,49 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
+
+def init_system():
+    """Initialize the monitoring system"""
+    logger.info("Initializing Docker container monitoring system...")
+
+    try:
+        # Start monitoring all containers
+        process_all_containers()
+        logger.info("Container monitoring initialized")
+
+        # Start background tasks (stats polling, log cleanup)
+        start_background_tasks()
+        logger.info("Background tasks started")
+
+        logger.info("System initialization complete")
+
+    except Exception as e:
+        logger.error(f"[System Init] Error: {e}")
+        raise
+
+
+def cleanup_on_exit():
+    """Cleanup function called on application exit"""
+    logger.info("Application shutting down...")
+    shutdown()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    logger.info("Starting application lifespan...")
+    init_system()
+    yield
+    # Shutdown
+    logger.info("Shutting down application...")
+    shutdown()
+
+
 app = FastAPI(
     title="Docker Container Monitor",
     description="Monitor Docker containers, stats, and error logs",
     version="2.0.0",
+    lifespan=lifespan,
 )
 
 
@@ -123,32 +163,6 @@ async def health_check():
 async def serve_dashboard():
     """Serve the main dashboard"""
     return FileResponse("templates/index.html")
-
-
-def init_system():
-    """Initialize the monitoring system"""
-    logger.info("Initializing Docker container monitoring system...")
-
-    try:
-        # Start monitoring all containers
-        process_all_containers()
-        logger.info("Container monitoring initialized")
-
-        # Start background tasks (stats polling, log cleanup)
-        start_background_tasks()
-        logger.info("Background tasks started")
-
-        logger.info("System initialization complete")
-
-    except Exception as e:
-        logger.error(f"[System Init] Error: {e}")
-        raise
-
-
-def cleanup_on_exit():
-    """Cleanup function called on application exit"""
-    logger.info("Application shutting down...")
-    shutdown()
 
 
 # Register cleanup handler
