@@ -7,6 +7,7 @@ services:
     ports:
       - "8502:8502"
     volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
       - ./data:/app/data:rw
     environment:
       - PYTHONPATH=/app
