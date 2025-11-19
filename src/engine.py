@@ -186,7 +186,7 @@ def process_all_containers():
 
 def poll_stats_continuously():
     """Background thread that polls stats every N seconds"""
-    poll_interval = 5  # seconds
+    poll_interval = 30  # seconds
     logger.info(f"Starting stats polling (interval: {poll_interval}s)")
 
     while not shutdown_event.is_set():
@@ -392,7 +392,7 @@ def get_container_errors(
     )
 
 
-def get_error_summary(container_name: str = None, hours: int = 24):
+def get_error_summary(container_name: str | None = None, hours: int = 24):
     """Get error summary statistics"""
     return db.get_error_summary(container_name=container_name, hours=hours)
 

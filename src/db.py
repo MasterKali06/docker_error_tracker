@@ -5,10 +5,12 @@ import threading
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 
-DATABASE_PATH = os.getenv("DATABASE_PATH", "/data/error_logs.db")
+DATABASE_PATH = os.getenv("DATABASE_PATH", "./data/error_logs.db")
 RETENTION_DAYS = int(os.getenv("LOG_RETENTION_DAYS", "7"))
 
 logger = logging.getLogger(__name__)
+
+print(DATABASE_PATH)
 
 
 class LiteDb:
@@ -264,7 +266,7 @@ class LiteDb:
             logger.error(f"Error during cleanup: {e}")
             return 0
 
-    def get_error_summary(self, container_name: str = None, hours: int = 24):
+    def get_error_summary(self, container_name: str | None = None, hours: int = 24):
         """Get error summary statistics"""
         with self.get_connection() as conn:
             cursor = conn.cursor()
