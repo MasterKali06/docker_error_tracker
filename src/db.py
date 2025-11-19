@@ -1,8 +1,11 @@
+import os
 import sqlite3
+
+DATABASE_PATH = os.getenv("DATABASE_PATH", "/data/error_logs.db")
 
 
 class LiteDb:
-    def __init__(self, db_path="error_logs.db") -> None:
+    def __init__(self, db_path=DATABASE_PATH) -> None:
         self.db_path = db_path
         self.init_db()
 

@@ -1,3 +1,4 @@
 error_logs.db
 test_container/
 venv/
+data/

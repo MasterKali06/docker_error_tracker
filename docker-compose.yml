@@ -1,0 +1,14 @@
+version: '3.8'
+
+services:
+  docker-error-tracker:
+    build: .
+    container_name: docker_error_tracker
+    ports:
+      - "8502:8502"
+    volumes:
+      - ./data:/app/data:rw
+    environment:
+      - PYTHONPATH=/app
+      - DATABASE_PATH=/app/data/error_logs.db
+    restart: unless-stopped
