@@ -1,0 +1,3 @@
+docker
+uvicorn[standard]
+fastapi

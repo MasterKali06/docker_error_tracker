@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Docker Error Tracker</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: Arial, sans-serif; display: flex; height: 100vh; background: #0d1117; color: #c9d1d9; }
+        
+        /* Sidebar */
+        .sidebar { width: 250px; background: #161b22; border-right: 1px solid #30363d; padding: 20px; overflow-y: auto; }
+        .sidebar h2 { margin-bottom: 20px; font-size: 18px; color: #f0f6fc; }
+        .container-list { list-style: none; }
+        .container-item { padding: 10px; margin: 5px 0; background: #21262d; border: 1px solid #30363d; border-radius: 6px; cursor: pointer; transition: all 0.2s; }
+        .container-item:hover { background: #30363d; border-color: #58a6ff; }
+        .container-item.active { background: #1f6feb; border-color: #1f6feb; }
+        
+        /* Main Content */
+        .main { flex: 1; padding: 20px; display: flex; flex-direction: column; }
+        
+        /* Stats */
+        .stats { background: #161b22; padding: 15px; border-radius: 8px; margin-bottom: 20px; border: 1px solid #30363d; }
+        .stats-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px; }
+        .stat-item { background: #0d1117; padding: 12px; border-radius: 6px; border: 1px solid #30363d; font-weight: bold; }
+        .refresh-btn { background: #238636; color: white; border: none; padding: 8px 15px; border-radius: 6px; cursor: pointer; transition: background 0.2s; }
+        .refresh-btn:hover { background: #2ea043; }
+        
+        /* Errors Table */
+        .errors { flex: 1; background: #161b22; border: 1px solid #30363d; border-radius: 8px; overflow: hidden; display: flex; flex-direction: column; }
+        .errors-header { background: #1f6feb; color: white; padding: 15px; font-weight: bold; }
+        .errors-table { flex: 1; overflow-y: auto; }
+        table { width: 100%; border-collapse: collapse; }
+        th, td { padding: 10px 15px; text-align: left; border-bottom: 1px solid #30363d; font-size: 13px; }
+        th { background: #21262d; font-weight: bold; color: #f0f6fc; position: sticky; top: 0; }
+        tr:hover { background: #1c2128; }
+        
+        /* Error Message Styles */
+        .error-message { max-width: 600px; line-height: 1.4; }
+        .truncated { color: #8b949e; cursor: pointer; }
+        .full-message { display: none; margin-top: 5px; padding: 8px; background: #0d1117; border-radius: 4px; border-left: 3px solid #1f6feb; }
+        .show-full .truncated { display: none; }
+        .show-full .full-message { display: block; }
+        
+        /* Timestamp column */
+        .timestamp { width: 180px; color: #8b949e; font-size: 12px; text-align: right; }
+        
+        /* Pagination */
+        .pagination { padding: 15px; background: #21262d; border-top: 1px solid #30363d; display: flex; justify-content: space-between; align-items: center; }
+        .pagination button { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; padding: 8px 16px; border-radius: 6px; cursor: pointer; transition: all 0.2s; }
+        .pagination button:hover:not(:disabled) { background: #30363d; border-color: #58a6ff; }
+        .pagination button:disabled { background: #0d1117; color: #484f58; cursor: not-allowed; }
+        .page-info { color: #8b949e; }
+    </style>
+</head>
+<body>
+    <!-- Sidebar -->
+    <div class="sidebar">
+        <h2>Containers</h2>
+        <ul class="container-list" id="containerList"></ul>
+    </div>
+
+    <!-- Main Content -->
+    <div class="main">
+        <!-- Stats -->
+        <div class="stats">
+            <div class="stats-grid" id="statsGrid"></div>
+            <button class="refresh-btn" onclick="loadStats(true)">Refresh Stats</button>
+        </div>
+
+        <!-- Errors -->
+        <div class="errors">
+            <div class="errors-header" id="errorsHeader">Select a container to view errors</div>
+            <div class="errors-table">
+                <table id="errorsTable">
+                    <thead>
+                        <tr>
+                            <th class="error-message">Error Message</th>
+                            <th class="timestamp">Timestamp</th>
+                        </tr>
+                    </thead>
+                    <tbody id="errorsBody"></tbody>
+                </table>
+            </div>
+            <div class="pagination" id="pagination" style="display: none;">
+                <button id="prevBtn" onclick="loadPreviousPage()">Previous</button>
+                <span class="page-info" id="pageInfo"></span>
+                <button id="nextBtn" onclick="loadNextPage()">Next</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentContainer = null;
+        let currentPage = { offset: 0, limit: 50, total: 0 };
+
+        // Load containers list
+        async function loadContainers() {
+            const response = await fetch('/api/containers');
+            const containers = await response.json();
+            
+            const containerList = document.getElementById('containerList');
+            containerList.innerHTML = '';
+            
+            containers.forEach(container => {
+                const li = document.createElement('li');
+                li.className = 'container-item';
+                li.textContent = container;
+                li.onclick = () => selectContainer(container);
+                containerList.appendChild(li);
+            });
+        }
+
+        // Select container
+        function selectContainer(container) {
+            currentContainer = container;
+            
+            // Update active state
+            document.querySelectorAll('.container-item').forEach(item => {
+                item.classList.remove('active');
+            });
+            event.target.classList.add('active');
+            
+            // Load stats and errors
+            loadStats();
+            loadErrors();
+        }
+
+        // Load stats (with optional force refresh)
+        async function loadStats(forceRefresh = false) {
+            if (!currentContainer) return;
+            
+            const url = forceRefresh ? '/api/containers/stats?refresh=true' : '/api/containers/stats';
+            const response = await fetch(url);
+            const stats = await response.json();
+            const containerStats = stats[currentContainer];
+            
+            document.getElementById('statsGrid').innerHTML = `
+                <div class="stat-item">CPU: ${containerStats?.cpu?.toFixed(2) || 0}%</div>
+                <div class="stat-item">Memory: ${(containerStats?.memory / 1024 / 1024)?.toFixed(2) || 0} MB</div>
+            `;
+        }
+
+        // Truncate error message
+        function truncateError(message, wordLimit = 30) {
+            const words = message.split(' ');
+            if (words.length <= wordLimit) return message;
+            return words.slice(0, wordLimit).join(' ') + '...';
+        }
+
+        // Toggle full error message
+        function toggleError(element) {
+            element.parentElement.classList.toggle('show-full');
+        }
+
+        // Load errors with pagination
+        async function loadErrors(offset = 0) {
+            if (!currentContainer) return;
+            
+            const response = await fetch(`/api/errors/${currentContainer}?offset=${offset}&limit=${currentPage.limit}`);
+            const data = await response.json();
+            
+            // Update header
+            document.getElementById('errorsHeader').textContent = 
+                `Errors for ${currentContainer} (${data.pagination.total} total)`;
+            
+            // Update errors table
+            const errorsBody = document.getElementById('errorsBody');
+            errorsBody.innerHTML = '';
+            
+            data.errors.forEach(error => {
+                const row = errorsBody.insertRow();
+                
+                // Error message cell
+                const messageCell = row.insertCell(0);
+                messageCell.className = 'error-message';
+                messageCell.innerHTML = `
+                    <div class="truncated" onclick="toggleError(this)">
+                        ${truncateError(error.error_message)}
+                    </div>
+                    <div class="full-message">
+                        ${error.error_message}
+                    </div>
+                `;
+                
+                // Timestamp cell
+                const timeCell = row.insertCell(1);
+                timeCell.className = 'timestamp';
+                timeCell.textContent = new Date(error.timestamp).toLocaleString();
+            });
+            
+            // Update pagination
+            currentPage = { ...data.pagination, offset };
+            updatePagination();
+        }
+
+        // Update pagination controls
+        function updatePagination() {
+            const pagination = document.getElementById('pagination');
+            const pageInfo = document.getElementById('pageInfo');
+            const prevBtn = document.getElementById('prevBtn');
+            const nextBtn = document.getElementById('nextBtn');
+            
+            pagination.style.display = 'flex';
+            pageInfo.textContent = `Page ${Math.floor(currentPage.offset / currentPage.limit) + 1} of ${Math.ceil(currentPage.total / currentPage.limit)}`;
+            prevBtn.disabled = !currentPage.has_prev;
+            nextBtn.disabled = !currentPage.has_next;
+        }
+
+        // Pagination functions
+        function loadNextPage() {
+            if (currentPage.has_next) {
+                loadErrors(currentPage.offset + currentPage.limit);
+            }
+        }
+
+        function loadPreviousPage() {
+            if (currentPage.has_prev) {
+                loadErrors(Math.max(0, currentPage.offset - currentPage.limit));
+            }
+        }
+
+        // Initialize
+        loadContainers();
+    </script>
+</body>
+</html>

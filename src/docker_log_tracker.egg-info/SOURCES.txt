@@ -1,0 +1,5 @@
+setup.py
+src/docker_log_tracker.egg-info/PKG-INFO
+src/docker_log_tracker.egg-info/SOURCES.txt
+src/docker_log_tracker.egg-info/dependency_links.txt
+src/docker_log_tracker.egg-info/top_level.txt
