@@ -192,15 +192,20 @@ def poll_stats_continuously():
     while not shutdown_event.is_set():
         try:
             fresh_stats = get_container_stats()
-            with stats_lock:
-                global stats_data
-                stats_data = fresh_stats
+
+            if fresh_stats:
+                with stats_lock:
+                    global stats_data
+                    stats_data = fresh_stats
+                logger.debug(f"Updated stats for {len(fresh_stats)} containers")
+            else:
+                logger.warning("Stats polling returned empty data")
 
             # Also sync container monitoring
             sync_container_monitoring()
 
         except Exception as e:
-            logger.error(f"Error polling stats: {e}")
+            logger.error(f"Error polling stats: {e}", exc_info=True)
 
         shutdown_event.wait(poll_interval)
 
@@ -228,6 +233,16 @@ def cleanup_old_logs():
 
 def start_background_tasks():
     """Start all background tasks"""
+    # Initialize stats immediately on startup
+    try:
+        initial_stats = get_container_stats()
+        with stats_lock:
+            global stats_data
+            stats_data = initial_stats
+        logger.info(f"Initialized stats with {len(initial_stats)} containers")
+    except Exception as e:
+        logger.error(f"Error initializing stats: {e}")
+
     # Stats polling thread
     stats_thread = threading.Thread(
         target=poll_stats_continuously,
@@ -263,19 +278,28 @@ def get_container_list():
 def retrieve_stats():
     """Return cached stats immediately (always fast)"""
     with stats_lock:
-        return stats_data.copy()
+        stats_copy = stats_data.copy()
+
+    if not stats_copy:
+        logger.warning(
+            "Stats data is empty, background polling may not have started yet"
+        )
+
+    return stats_copy
 
 
 def get_container_stats():
     """Fetch fresh container stats from Docker"""
     docker_client = get_docker_client()
     if not docker_client:
+        logger.error("Docker client not available for stats")
         return {}
 
     container_stats = {}
 
     try:
         containers = docker_client.containers.list()
+        logger.debug(f"Fetching stats for {len(containers)} containers")
 
         for container in containers:
             try:
@@ -340,6 +364,10 @@ def get_container_stats():
                     "cpu_percent": round(cpu_percent, 2),
                 }
 
+                logger.debug(
+                    f"Got stats for {cm}: CPU={cpu_percent:.1f}%, Mem={memory_percent:.1f}%"
+                )
+
             except Exception as e:
                 logger.error(f"Error getting stats for {container.name}: {e}")
                 container_stats[container.name] = {
@@ -347,8 +375,10 @@ def get_container_stats():
                     "error": str(e),
                 }
 
+        logger.info(f"Successfully fetched stats for {len(container_stats)} containers")
+
     except Exception as e:
-        logger.error(f"Error getting container stats: {e}")
+        logger.error(f"Error getting container stats: {e}", exc_info=True)
 
     return container_stats
 
