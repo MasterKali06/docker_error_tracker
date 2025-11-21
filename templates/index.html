@@ -190,6 +190,15 @@
             background: var(--accent);
         }
 
+        .terminal-controls button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .terminal-controls button:disabled:hover {
+            background: var(--bg-card);
+        }
+
         .terminal-content {
             flex: 1;
             padding: 15px;
@@ -239,17 +248,6 @@
             height: 100%;
             color: var(--text-secondary);
             font-style: italic;
-        }
-
-        .load-more {
-            text-align: center;
-            padding: 10px;
-            color: var(--terminal-cyan);
-            cursor: pointer;
-        }
-
-        .load-more:hover {
-            text-decoration: underline;
         }
 
         /* Loading States */
@@ -322,6 +320,7 @@
                         <button onclick="clearTerminal()">Clear</button>
                         <button onclick="toggleAutoScroll()" id="autoScrollBtn">Auto-scroll: On</button>
                         <button onclick="refreshLogs()">Refresh</button>
+                        <button onclick="loadOlderLogs()" id="loadOlderBtn" disabled>Load Older</button>
                     </div>
                 </div>
                 <div class="terminal-content" id="terminalContent">
@@ -385,32 +384,19 @@
                     `;
                 }).join('');
 
-                // Add scroll event listener for infinite scroll
-                const terminalContent = document.getElementById('terminalContent');
-                terminalContent.addEventListener('scroll', handleTerminalScroll);
-
             } catch (error) {
                 console.error('Error loading containers:', error);
                 document.getElementById('containersList').innerHTML = '<div class="empty-terminal">Error loading containers</div>';
             }
         }
 
-        // Handle terminal scroll for infinite scroll
-        function handleTerminalScroll() {
-            const terminalContent = document.getElementById('terminalContent');
-            
-            // If scrolled near top and there are more logs to load
-            if (terminalContent.scrollTop < 100 && hasMoreLogs && !isLoadingMore && currentContainer) {
-                loadMoreLogs();
-            }
-        }
-
-        // Load more logs (infinite scroll)
-        async function loadMoreLogs() {
-            if (isLoadingMore || !hasMoreLogs) return;
+        // Load older logs manually
+        async function loadOlderLogs() {
+            if (isLoadingMore || !hasMoreLogs || !currentContainer) return;
             
             try {
                 isLoadingMore = true;
+                updateLoadOlderButton();
                 
                 const response = await fetch(`/api/errors/${currentContainer}?limit=50&offset=${currentOffset + 50}`);
                 const result = await response.json();
@@ -423,11 +409,34 @@
                 }
                 
                 hasMoreLogs = pagination.has_prev || false;
+                updateLoadOlderButton();
                 
             } catch (error) {
-                console.error('Error loading more logs:', error);
+                console.error('Error loading older logs:', error);
             } finally {
                 isLoadingMore = false;
+                updateLoadOlderButton();
+            }
+        }
+
+        // Update the Load Older button state
+        function updateLoadOlderButton() {
+            const loadOlderBtn = document.getElementById('loadOlderBtn');
+            if (!currentContainer) {
+                loadOlderBtn.disabled = true;
+                loadOlderBtn.textContent = 'Load Older';
+                return;
+            }
+            
+            if (isLoadingMore) {
+                loadOlderBtn.disabled = true;
+                loadOlderBtn.textContent = 'Loading...';
+            } else if (!hasMoreLogs) {
+                loadOlderBtn.disabled = true;
+                loadOlderBtn.textContent = 'No Older Logs';
+            } else {
+                loadOlderBtn.disabled = false;
+                loadOlderBtn.textContent = 'Load Older';
             }
         }
 
@@ -445,6 +454,9 @@
             
             document.getElementById('terminalTitle').textContent = `Error Logs - ${containerName}`;
             document.getElementById('statsHeader').style.display = 'block';
+            
+            // Update button state
+            updateLoadOlderButton();
             
             // Load initial data
             loadStats();
@@ -502,6 +514,7 @@
                 currentOffset = 0;
                 hasMoreLogs = pagination.has_prev || false;
                 displayLogs(errors, false);
+                updateLoadOlderButton();
             } catch (error) {
                 console.error('Error loading logs:', error);
             }
@@ -570,16 +583,13 @@
                     </div>
                 `;
             }).join('');
-
-            // Add load more button at top if there are more logs
-            const loadMoreButton = hasMoreLogs ? '<div class="load-more" onclick="loadMoreLogs()">Load older logs...</div>' : '';
             
             if (appendToTop) {
-                // Append to top for infinite scroll
-                terminalContent.innerHTML = loadMoreButton + logLines + terminalContent.innerHTML;
+                // Append to top for older logs
+                terminalContent.innerHTML = logLines + terminalContent.innerHTML;
             } else {
                 // Replace content for normal loading
-                terminalContent.innerHTML = loadMoreButton + logLines;
+                terminalContent.innerHTML = logLines;
                 
                 // Auto-scroll to bottom to show latest errors
                 if (autoScroll) {
@@ -610,6 +620,7 @@
             document.getElementById('terminalContent').innerHTML = '<div class="empty-terminal">Terminal cleared</div>';
             currentOffset = 0;
             hasMoreLogs = true;
+            updateLoadOlderButton();
         }
 
         function toggleAutoScroll() {
