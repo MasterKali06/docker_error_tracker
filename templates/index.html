@@ -241,6 +241,17 @@
             font-style: italic;
         }
 
+        .load-more {
+            text-align: center;
+            padding: 10px;
+            color: var(--terminal-cyan);
+            cursor: pointer;
+        }
+
+        .load-more:hover {
+            text-decoration: underline;
+        }
+
         /* Loading States */
         .loading {
             display: flex;
@@ -327,6 +338,9 @@
         let autoScroll = true;
         let logsInterval = null;
         let statsInterval = null;
+        let currentOffset = 0;
+        let hasMoreLogs = true;
+        let isLoadingMore = false;
 
         // Initialize the application
         async function initApp() {
@@ -334,7 +348,7 @@
             
             // Set up intervals
             statsInterval = setInterval(loadStats, 60000); // 1 minute
-            logsInterval = setInterval(loadLogs, 30000); // 30 seconds
+            logsInterval = setInterval(loadLogs, 60000); // 1 minute (changed from 5 seconds)
             
             // Load initial data
             loadStats();
@@ -370,15 +384,58 @@
                         </div>
                     `;
                 }).join('');
+
+                // Add scroll event listener for infinite scroll
+                const terminalContent = document.getElementById('terminalContent');
+                terminalContent.addEventListener('scroll', handleTerminalScroll);
+
             } catch (error) {
                 console.error('Error loading containers:', error);
                 document.getElementById('containersList').innerHTML = '<div class="empty-terminal">Error loading containers</div>';
             }
         }
 
+        // Handle terminal scroll for infinite scroll
+        function handleTerminalScroll() {
+            const terminalContent = document.getElementById('terminalContent');
+            
+            // If scrolled near top and there are more logs to load
+            if (terminalContent.scrollTop < 100 && hasMoreLogs && !isLoadingMore && currentContainer) {
+                loadMoreLogs();
+            }
+        }
+
+        // Load more logs (infinite scroll)
+        async function loadMoreLogs() {
+            if (isLoadingMore || !hasMoreLogs) return;
+            
+            try {
+                isLoadingMore = true;
+                
+                const response = await fetch(`/api/errors/${currentContainer}?limit=50&offset=${currentOffset + 50}`);
+                const result = await response.json();
+                const errors = result.errors || [];
+                const pagination = result.pagination || {};
+                
+                if (errors.length > 0) {
+                    currentOffset += 50;
+                    displayLogs(errors, true); // Append to top
+                }
+                
+                hasMoreLogs = pagination.has_prev || false;
+                
+            } catch (error) {
+                console.error('Error loading more logs:', error);
+            } finally {
+                isLoadingMore = false;
+            }
+        }
+
         // Select container
         function selectContainer(containerName) {
             currentContainer = containerName;
+            currentOffset = 0;
+            hasMoreLogs = true;
             
             // Update UI
             document.querySelectorAll('.container-item').forEach(item => {
@@ -432,48 +489,63 @@
             }
         }
 
-        
-
         // Load logs for current container
         async function loadLogs() {
             if (!currentContainer) return;
             
             try {
-                const response = await fetch(`/api/errors/${currentContainer}?limit=200`); // Increased limit to capture more for grouping
+                const response = await fetch(`/api/errors/${currentContainer}?limit=100`);
                 const result = await response.json();
                 const errors = result.errors || [];
+                const pagination = result.pagination || {};
                 
-                displayLogs(errors);
+                currentOffset = 0;
+                hasMoreLogs = pagination.has_prev || false;
+                displayLogs(errors, false);
             } catch (error) {
                 console.error('Error loading logs:', error);
             }
         }
 
-        // Display logs in terminal format with grouping
-        function displayLogs(errors) {
+        // Extract the actual error message without timestamps for grouping
+        function extractErrorMessage(rawMessage) {
+            // Remove common timestamp patterns from the beginning of messages
+            return rawMessage
+                .replace(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:,\d+)?\s*/, '') // Remove "2025-11-21 13:35:08,011"
+                .replace(/^\[\d{1,2}\/\d{1,2}\/\d{4}, \d{1,2}:\d{2}:\d{2} (?:AM|PM)\]\s*/, '') // Remove "[11/21/2025, 1:35:08 PM]"
+                .replace(/^\d{2}:\d{2}:\d{2}\s*/, '') // Remove "13:35:08"
+                .trim();
+        }
+
+        // Display logs in terminal format with grouping (ignoring message timestamps)
+        function displayLogs(errors, appendToTop = false) {
             const terminalContent = document.getElementById('terminalContent');
             
             if (errors.length === 0) {
-                terminalContent.innerHTML = '<div class="empty-terminal">No error logs found</div>';
+                if (!appendToTop) {
+                    terminalContent.innerHTML = '<div class="empty-terminal">No error logs found</div>';
+                }
                 return;
             }
             
-            // Group identical errors and count occurrences
+            // Group identical errors (ignoring timestamps in messages) and count occurrences
             const errorGroups = {};
             errors.forEach(error => {
-                const message = error.error_message;
-                if (!errorGroups[message]) {
-                    errorGroups[message] = {
-                        message: message,
+                const cleanMessage = extractErrorMessage(error.error_message);
+                if (!errorGroups[cleanMessage]) {
+                    errorGroups[cleanMessage] = {
+                        originalMessage: error.error_message, // Keep original for display
+                        cleanMessage: cleanMessage,
                         occurrences: 0,
                         latestTimestamp: error.timestamp
                     };
                 }
-                errorGroups[message].occurrences += error.occurrence_count || 1;
+                errorGroups[cleanMessage].occurrences += error.occurrence_count || 1;
                 
                 // Keep the latest timestamp
-                if (new Date(error.timestamp) > new Date(errorGroups[message].latestTimestamp)) {
-                    errorGroups[message].latestTimestamp = error.timestamp;
+                if (new Date(error.timestamp) > new Date(errorGroups[cleanMessage].latestTimestamp)) {
+                    errorGroups[cleanMessage].latestTimestamp = error.timestamp;
+                    errorGroups[cleanMessage].originalMessage = error.error_message; // Update to latest original message
                 }
             });
             
@@ -484,8 +556,9 @@
             
             // Convert grouped errors to terminal lines
             const logLines = groupedErrors.map(group => {
-                const timestamp = new Date(group.latestTimestamp).toLocaleString(); // Browser local time
-                const logClass = getLogLevelClass(group.message);
+                // Use browser's local time (like Iran time) instead of UTC
+                const timestamp = new Date(group.latestTimestamp).toLocaleString();
+                const logClass = getLogLevelClass(group.originalMessage);
                 
                 // Show occurrence count if more than 1
                 const occurrenceText = group.occurrences > 1 ? ` [x${group.occurrences}]` : '';
@@ -493,21 +566,29 @@
                 return `
                     <div class="log-line">
                         <span class="log-time">[${timestamp}]</span>
-                        <span class="log-message ${logClass}">${escapeHtml(group.message)}${occurrenceText}</span>
+                        <span class="log-message ${logClass}">${escapeHtml(group.originalMessage)}${occurrenceText}</span>
                     </div>
                 `;
             }).join('');
+
+            // Add load more button at top if there are more logs
+            const loadMoreButton = hasMoreLogs ? '<div class="load-more" onclick="loadMoreLogs()">Load older logs...</div>' : '';
             
-            terminalContent.innerHTML = logLines;
-            
-            // Auto-scroll to bottom to show latest errors
-            if (autoScroll) {
-                terminalContent.scrollTop = terminalContent.scrollHeight;
+            if (appendToTop) {
+                // Append to top for infinite scroll
+                terminalContent.innerHTML = loadMoreButton + logLines + terminalContent.innerHTML;
+            } else {
+                // Replace content for normal loading
+                terminalContent.innerHTML = loadMoreButton + logLines;
+                
+                // Auto-scroll to bottom to show latest errors
+                if (autoScroll) {
+                    setTimeout(() => {
+                        terminalContent.scrollTop = terminalContent.scrollHeight;
+                    }, 100);
+                }
             }
         }
-
-
-        
 
         // Determine log level for coloring
         function getLogLevelClass(message) {
@@ -522,11 +603,13 @@
             } else {
                 return 'log-info';
             }
-        } 
+        }
 
         // Terminal controls
         function clearTerminal() {
-            document.getElementById('terminalContent').innerHTML = '';
+            document.getElementById('terminalContent').innerHTML = '<div class="empty-terminal">Terminal cleared</div>';
+            currentOffset = 0;
+            hasMoreLogs = true;
         }
 
         function toggleAutoScroll() {
