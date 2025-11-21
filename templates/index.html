@@ -334,7 +334,7 @@
             
             // Set up intervals
             statsInterval = setInterval(loadStats, 60000); // 1 minute
-            logsInterval = setInterval(loadLogs, 5000); // 5 seconds
+            logsInterval = setInterval(loadLogs, 30000); // 30 seconds
             
             // Load initial data
             loadStats();
@@ -432,12 +432,14 @@
             }
         }
 
+        
+
         // Load logs for current container
         async function loadLogs() {
             if (!currentContainer) return;
             
             try {
-                const response = await fetch(`/api/errors/${currentContainer}?limit=100`);
+                const response = await fetch(`/api/errors/${currentContainer}?limit=200`); // Increased limit to capture more for grouping
                 const result = await response.json();
                 const errors = result.errors || [];
                 
@@ -447,7 +449,7 @@
             }
         }
 
-        // Display logs in terminal format
+        // Display logs in terminal format with grouping
         function displayLogs(errors) {
             const terminalContent = document.getElementById('terminalContent');
             
@@ -456,26 +458,56 @@
                 return;
             }
             
-            // Convert errors to terminal lines
-            const logLines = errors.map(error => {
-                const timestamp = new Date(error.timestamp).toLocaleString();
-                const logClass = getLogLevelClass(error.error_message);
+            // Group identical errors and count occurrences
+            const errorGroups = {};
+            errors.forEach(error => {
+                const message = error.error_message;
+                if (!errorGroups[message]) {
+                    errorGroups[message] = {
+                        message: message,
+                        occurrences: 0,
+                        latestTimestamp: error.timestamp
+                    };
+                }
+                errorGroups[message].occurrences += error.occurrence_count || 1;
+                
+                // Keep the latest timestamp
+                if (new Date(error.timestamp) > new Date(errorGroups[message].latestTimestamp)) {
+                    errorGroups[message].latestTimestamp = error.timestamp;
+                }
+            });
+            
+            // Convert to array and sort by latest timestamp (oldest first, so newest appears at bottom)
+            const groupedErrors = Object.values(errorGroups).sort((a, b) => 
+                new Date(a.latestTimestamp) - new Date(b.latestTimestamp)
+            );
+            
+            // Convert grouped errors to terminal lines
+            const logLines = groupedErrors.map(group => {
+                const timestamp = new Date(group.latestTimestamp).toLocaleString(); // Browser local time
+                const logClass = getLogLevelClass(group.message);
+                
+                // Show occurrence count if more than 1
+                const occurrenceText = group.occurrences > 1 ? ` [x${group.occurrences}]` : '';
                 
                 return `
                     <div class="log-line">
                         <span class="log-time">[${timestamp}]</span>
-                        <span class="log-message ${logClass}">${escapeHtml(error.error_message)}</span>
+                        <span class="log-message ${logClass}">${escapeHtml(group.message)}${occurrenceText}</span>
                     </div>
                 `;
             }).join('');
             
             terminalContent.innerHTML = logLines;
             
-            // Auto-scroll to bottom
+            // Auto-scroll to bottom to show latest errors
             if (autoScroll) {
                 terminalContent.scrollTop = terminalContent.scrollHeight;
             }
         }
+
+
+        
 
         // Determine log level for coloring
         function getLogLevelClass(message) {
@@ -490,7 +522,7 @@
             } else {
                 return 'log-info';
             }
-        }
+        } 
 
         // Terminal controls
         function clearTerminal() {

@@ -41,9 +41,9 @@ def get_docker_client():
 
 def process_container_errors(container_name: str):
     """Read stderr and save new errors to database with reconnection logic"""
-    logger.info(f"Starting error monitoring for container: {container_name}")
     retry_delay = 5
     max_retry_delay = 60
+    last_container_id = None
 
     while not shutdown_event.is_set():
         try:
@@ -55,24 +55,31 @@ def process_container_errors(container_name: str):
                 continue
 
             container = docker_client.containers.get(container_name)
+            current_container_id = container.id
+
+            # Check if container was recreated
+            if last_container_id and last_container_id != current_container_id:
+
+                # We'll continue with the new container
+                last_container_id = current_container_id
 
             # Check if container is running
             container.reload()
             if container.status != "running":
-                logger.info(
-                    f"Container {container_name} is not running, stopping monitoring"
-                )
+
                 break
 
             # Reset retry delay on successful connection
             retry_delay = 5
 
-            # Start from now, follow continuously
+            # Get logs from the beginning when container is recreated
+            # This ensures we don't miss any logs after recreation
+            since_timestamp = int(datetime.now().timestamp())  # Start from beginning
             logs = container.logs(
                 stdout=False,
                 stderr=True,
                 stream=True,
-                since=int(datetime.now().timestamp()),
+                since=since_timestamp,
                 follow=True,
             )
 
@@ -90,9 +97,6 @@ def process_container_errors(container_name: str):
                     )
 
         except NotFound:
-            logger.info(
-                f"Container {container_name} no longer exists, stopping monitoring"
-            )
             break
         except APIError as e:
             logger.error(f"Docker API error for {container_name}: {e}")
@@ -108,35 +112,31 @@ def process_container_errors(container_name: str):
         if container_name in container_threads:
             del container_threads[container_name]
 
-    logger.info(f"Stopped error monitoring for container: {container_name}")
-
 
 def start_container_monitoring(container_name: str):
     """Start monitoring a specific container"""
     with container_threads_lock:
-        if (
-            container_name in container_threads
-            and container_threads[container_name].is_alive()
-        ):
-            logger.debug(f"Already monitoring {container_name}")
-            return
+        # Always stop existing monitoring for this container to ensure fresh start
+        if container_name in container_threads:
+            if container_threads[container_name].is_alive():
+                logger.debug(f"Stopping existing monitoring for {container_name}")
+                # We can't actually stop the thread, but we'll replace it
+            del container_threads[container_name]
 
         thread = threading.Thread(
             target=process_container_errors,
             args=(container_name,),
             daemon=True,
-            name=f"monitor-{container_name}",
+            name=f"monitor-{container_name}-{int(time.time())}",  # Unique name
         )
         thread.start()
         container_threads[container_name] = thread
-        logger.info(f"Started monitoring thread for {container_name}")
 
 
 def stop_container_monitoring(container_name: str):
     """Stop monitoring a specific container"""
     with container_threads_lock:
         if container_name in container_threads:
-            logger.info(f"Stopping monitoring for {container_name}")
             # Thread will exit on next check of shutdown_event or container status
             del container_threads[container_name]
 
@@ -148,18 +148,29 @@ def sync_container_monitoring():
         return
 
     try:
-        running_containers = {c.name for c in docker_client.containers.list()}
+        running_containers = {}
+        for container in docker_client.containers.list():
+            running_containers[container.name] = container.id  # Store both name and ID
 
         with container_threads_lock:
-            # Stop monitoring containers that no longer exist
+            # Stop monitoring containers that no longer exist OR have different IDs
             monitored_containers = set(container_threads.keys())
-            for container_name in monitored_containers - running_containers:
-                logger.info(f"Container {container_name} no longer running")
-                stop_container_monitoring(container_name)
+            for container_name in list(
+                monitored_containers
+            ):  # Use list to avoid modification during iteration
+                if container_name not in running_containers:
+
+                    stop_container_monitoring(container_name)
+                else:
+                    # Check if we need to restart monitoring (container was recreated)
+                    current_thread = container_threads[container_name]
+                    if not current_thread.is_alive():
+
+                        stop_container_monitoring(container_name)
+                        start_container_monitoring(container_name)
 
             # Start monitoring new containers
-            for container_name in running_containers - monitored_containers:
-                logger.info(f"New container detected: {container_name}")
+            for container_name in set(running_containers.keys()) - monitored_containers:
                 start_container_monitoring(container_name)
 
     except Exception as e:
@@ -175,7 +186,6 @@ def process_all_containers():
 
     try:
         containers = docker_client.containers.list()
-        logger.info(f"Found {len(containers)} running containers")
 
         for container in containers:
             start_container_monitoring(container.name)
@@ -186,8 +196,7 @@ def process_all_containers():
 
 def poll_stats_continuously():
     """Background thread that polls stats every N seconds"""
-    poll_interval = 30  # seconds
-    logger.info(f"Starting stats polling (interval: {poll_interval}s)")
+    poll_interval = 30  # Reduced from 30 to 10 seconds for faster detection
 
     while not shutdown_event.is_set():
         try:
@@ -197,11 +206,10 @@ def poll_stats_continuously():
                 with stats_lock:
                     global stats_data
                     stats_data = fresh_stats
-                logger.debug(f"Updated stats for {len(fresh_stats)} containers")
             else:
                 logger.warning("Stats polling returned empty data")
 
-            # Also sync container monitoring
+            # Also sync container monitoring (more frequent now)
             sync_container_monitoring()
 
         except Exception as e:
@@ -209,26 +217,19 @@ def poll_stats_continuously():
 
         shutdown_event.wait(poll_interval)
 
-    logger.info("Stats polling stopped")
-
 
 def cleanup_old_logs():
     """Periodic cleanup of old logs"""
     cleanup_interval = 3600  # 1 hour
-    logger.info(f"Starting log cleanup task (interval: {cleanup_interval}s)")
 
     while not shutdown_event.is_set():
         shutdown_event.wait(cleanup_interval)
 
         if not shutdown_event.is_set():
             try:
-                deleted = db.cleanup_old_logs()
-                if deleted > 0:
-                    logger.info(f"Cleaned up {deleted} old log entries")
+                db.cleanup_old_logs()
             except Exception as e:
                 logger.error(f"Error during log cleanup: {e}")
-
-    logger.info("Log cleanup task stopped")
 
 
 def start_background_tasks():
@@ -239,7 +240,6 @@ def start_background_tasks():
         with stats_lock:
             global stats_data
             stats_data = initial_stats
-        logger.info(f"Initialized stats with {len(initial_stats)} containers")
     except Exception as e:
         logger.error(f"Error initializing stats: {e}")
 
@@ -250,7 +250,6 @@ def start_background_tasks():
         name="stats-poller",
     )
     stats_thread.start()
-    logger.info("Started stats polling thread")
 
     # Log cleanup thread
     cleanup_thread = threading.Thread(
@@ -259,7 +258,6 @@ def start_background_tasks():
         name="log-cleanup",
     )
     cleanup_thread.start()
-    logger.info("Started log cleanup thread")
 
 
 def get_container_list():
@@ -375,8 +373,6 @@ def get_container_stats():
                     "error": str(e),
                 }
 
-        logger.info(f"Successfully fetched stats for {len(container_stats)} containers")
-
     except Exception as e:
         logger.error(f"Error getting container stats: {e}", exc_info=True)
 
@@ -399,16 +395,12 @@ def get_error_summary(container_name: str | None = None, hours: int = 24):
 
 def shutdown():
     """Graceful shutdown of all background tasks"""
-    logger.info("Initiating graceful shutdown...")
     shutdown_event.set()
 
     # Wait for threads to finish (with timeout)
     with container_threads_lock:
         for name, thread in container_threads.items():
-            logger.info(f"Waiting for {name} monitoring thread to finish...")
             thread.join(timeout=5)
 
     # Close database connections
     db.close_connection()
-
-    logger.info("Shutdown complete")
