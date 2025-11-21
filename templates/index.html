@@ -408,7 +408,7 @@
                     displayLogs(errors, true); // Append to top
                 }
                 
-                hasMoreLogs = pagination.has_prev || false;
+                hasMoreLogs = pagination.has_next || false;
                 updateLoadOlderButton();
                 
             } catch (error) {
@@ -512,7 +512,7 @@
                 const pagination = result.pagination || {};
                 
                 currentOffset = 0;
-                hasMoreLogs = pagination.has_prev || false;
+                hasMoreLogs = pagination.has_next || false;
                 displayLogs(errors, false);
                 updateLoadOlderButton();
             } catch (error) {
