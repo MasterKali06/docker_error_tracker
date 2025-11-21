@@ -104,6 +104,14 @@
             background: var(--danger);
         }
 
+        .status-exited {
+            background: var(--warning);
+        }
+
+        .status-unknown {
+            background: var(--text-secondary);
+        }
+
         .container-name {
             flex: 1;
             font-weight: 500;
@@ -340,6 +348,7 @@
         let currentOffset = 0;
         let hasMoreLogs = true;
         let isLoadingMore = false;
+        let allLoadedLogs = []; // Store all loaded logs to prevent losing history
 
         // Initialize the application
         async function initApp() {
@@ -347,13 +356,13 @@
             
             // Set up intervals
             statsInterval = setInterval(loadStats, 60000); // 1 minute
-            logsInterval = setInterval(loadLogs, 60000); // 1 minute (changed from 5 seconds)
+            logsInterval = setInterval(loadNewLogsOnly, 60000); // 1 minute - only load new logs
             
             // Load initial data
             loadStats();
         }
 
-        // Load containers list
+        // Load containers list with proper status detection
         async function loadContainers() {
             try {
                 const response = await fetch('/api/containers');
@@ -367,18 +376,20 @@
                     return;
                 }
 
-                // Also get stats to show container status
+                // Get fresh stats to ensure accurate container status
                 const statsResponse = await fetch('/api/containers/stats');
                 const statsResult = await statsResponse.json();
                 const stats = statsResult.data || {};
 
                 containersList.innerHTML = containers.map(name => {
                     const containerStats = stats[name] || {};
-                    const status = containerStats.status || 'stopped';
+                    // Use the status from stats which should be more accurate
+                    const status = containerStats.status || 'unknown';
+                    const statusClass = `status-${status.toLowerCase()}`;
                     
                     return `
                         <div class="container-item" onclick="selectContainer('${name}')" id="container-${name}">
-                            <div class="container-status status-${status}"></div>
+                            <div class="container-status ${statusClass}"></div>
                             <div class="container-name">${name}</div>
                         </div>
                     `;
@@ -390,6 +401,48 @@
             }
         }
 
+        // Load only new logs (for periodic updates)
+        async function loadNewLogsOnly() {
+            if (!currentContainer) return;
+            
+            try {
+                // Load only the latest logs without offset
+                const response = await fetch(`/api/errors/${currentContainer}?limit=50`);
+                const result = await response.json();
+                const newErrors = result.errors || [];
+                
+                if (newErrors.length > 0) {
+                    // Merge new logs with existing logs, avoiding duplicates
+                    mergeNewLogs(newErrors);
+                }
+                
+            } catch (error) {
+                console.error('Error loading new logs:', error);
+            }
+        }
+
+        // Merge new logs with existing logs
+        function mergeNewLogs(newErrors) {
+            // Create a Set of existing log IDs to avoid duplicates
+            const existingIds = new Set(allLoadedLogs.map(log => log.id));
+            
+            // Filter out logs that we already have
+            const trulyNewLogs = newErrors.filter(log => !existingIds.has(log.id));
+            
+            if (trulyNewLogs.length > 0) {
+                // Add new logs to the beginning of our collection (newest first in array)
+                allLoadedLogs = [...trulyNewLogs, ...allLoadedLogs];
+                
+                // Re-display all logs
+                displayAllLogs();
+                
+                // Update hasMoreLogs based on whether we have the complete history
+                // This is a simple approach - you might want to make it smarter
+                hasMoreLogs = allLoadedLogs.length >= 50; // If we have 50+ logs, assume there might be more
+                updateLoadOlderButton();
+            }
+        }
+
         // Load older logs manually
         async function loadOlderLogs() {
             if (isLoadingMore || !hasMoreLogs || !currentContainer) return;
@@ -398,17 +451,23 @@
                 isLoadingMore = true;
                 updateLoadOlderButton();
                 
-                const response = await fetch(`/api/errors/${currentContainer}?limit=50&offset=${currentOffset + 50}`);
+                // Load older logs with offset - use limit 100 for consistency
+                const response = await fetch(`/api/errors/${currentContainer}?limit=100&offset=${currentOffset + 100}`);
                 const result = await response.json();
-                const errors = result.errors || [];
+                const olderErrors = result.errors || [];
                 const pagination = result.pagination || {};
                 
-                if (errors.length > 0) {
-                    currentOffset += 50;
-                    displayLogs(errors, true); // Append to top
+                if (olderErrors.length > 0) {
+                    currentOffset += 100;
+                    
+                    // Add older logs to the end of our collection
+                    allLoadedLogs = [...allLoadedLogs, ...olderErrors];
+                    
+                    // Re-display all logs
+                    displayAllLogs();
                 }
                 
-                hasMoreLogs = pagination.has_next || false;
+                hasMoreLogs = pagination.has_prev || false;
                 updateLoadOlderButton();
                 
             } catch (error) {
@@ -445,6 +504,7 @@
             currentContainer = containerName;
             currentOffset = 0;
             hasMoreLogs = true;
+            allLoadedLogs = []; // Reset loaded logs
             
             // Update UI
             document.querySelectorAll('.container-item').forEach(item => {
@@ -460,90 +520,43 @@
             
             // Load initial data
             loadStats();
-            loadLogs();
+            loadInitialLogs();
         }
 
-        // Load stats for current container
-        async function loadStats() {
+        // Load initial logs for a container
+        async function loadInitialLogs() {
             if (!currentContainer) return;
             
             try {
-                const response = await fetch('/api/containers/stats');
-                const result = await response.json();
-                const stats = result.data || {};
-                const containerStats = stats[currentContainer] || {};
-                
-                const statsGrid = document.getElementById('statsGrid');
-                statsGrid.innerHTML = `
-                    <div class="stat-item">
-                        <div class="stat-label">Status</div>
-                        <div class="stat-value">${containerStats.status || 'Unknown'}</div>
-                    </div>
-                    <div class="stat-item">
-                        <div class="stat-label">CPU Usage</div>
-                        <div class="stat-value">${(containerStats.cpu_percent || 0).toFixed(1)}%</div>
-                    </div>
-                    <div class="stat-item">
-                        <div class="stat-label">Memory Usage</div>
-                        <div class="stat-value">${(containerStats.memory_percent || 0).toFixed(1)}%</div>
-                    </div>
-                    <div class="stat-item">
-                        <div class="stat-label">Memory</div>
-                        <div class="stat-value">${formatBytes(containerStats.memory_bytes || 0)}</div>
-                    </div>
-                    <div class="stat-item">
-                        <div class="stat-label">Uptime</div>
-                        <div class="stat-value">${formatUptime(containerStats.uptime_seconds || 0)}</div>
-                    </div>
-                `;
-            } catch (error) {
-                console.error('Error loading stats:', error);
-            }
-        }
-
-        // Load logs for current container
-        async function loadLogs() {
-            if (!currentContainer) return;
-            
-            try {
+                // Load initial batch of logs - use limit 100
                 const response = await fetch(`/api/errors/${currentContainer}?limit=100`);
                 const result = await response.json();
                 const errors = result.errors || [];
                 const pagination = result.pagination || {};
                 
+                allLoadedLogs = errors;
                 currentOffset = 0;
-                hasMoreLogs = pagination.has_next || false;
-                displayLogs(errors, false);
+                hasMoreLogs = pagination.has_prev || false;
+                
+                displayAllLogs();
                 updateLoadOlderButton();
             } catch (error) {
-                console.error('Error loading logs:', error);
+                console.error('Error loading initial logs:', error);
             }
         }
 
-        // Extract the actual error message without timestamps for grouping
-        function extractErrorMessage(rawMessage) {
-            // Remove common timestamp patterns from the beginning of messages
-            return rawMessage
-                .replace(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:,\d+)?\s*/, '') // Remove "2025-11-21 13:35:08,011"
-                .replace(/^\[\d{1,2}\/\d{1,2}\/\d{4}, \d{1,2}:\d{2}:\d{2} (?:AM|PM)\]\s*/, '') // Remove "[11/21/2025, 1:35:08 PM]"
-                .replace(/^\d{2}:\d{2}:\d{2}\s*/, '') // Remove "13:35:08"
-                .trim();
-        }
-
-        // Display logs in terminal format with grouping (ignoring message timestamps)
-        function displayLogs(errors, appendToTop = false) {
+        // Display all currently loaded logs
+        function displayAllLogs() {
             const terminalContent = document.getElementById('terminalContent');
             
-            if (errors.length === 0) {
-                if (!appendToTop) {
-                    terminalContent.innerHTML = '<div class="empty-terminal">No error logs found</div>';
-                }
+            if (allLoadedLogs.length === 0) {
+                terminalContent.innerHTML = '<div class="empty-terminal">No error logs found</div>';
                 return;
             }
             
             // Group identical errors (ignoring timestamps in messages) and count occurrences
             const errorGroups = {};
-            errors.forEach(error => {
+            allLoadedLogs.forEach(error => {
                 const cleanMessage = extractErrorMessage(error.error_message);
                 if (!errorGroups[cleanMessage]) {
                     errorGroups[cleanMessage] = {
@@ -584,20 +597,62 @@
                 `;
             }).join('');
             
-            if (appendToTop) {
-                // Append to top for older logs
-                terminalContent.innerHTML = logLines + terminalContent.innerHTML;
-            } else {
-                // Replace content for normal loading
-                terminalContent.innerHTML = logLines;
-                
-                // Auto-scroll to bottom to show latest errors
-                if (autoScroll) {
-                    setTimeout(() => {
-                        terminalContent.scrollTop = terminalContent.scrollHeight;
-                    }, 100);
-                }
+            terminalContent.innerHTML = logLines;
+            
+            // Auto-scroll to bottom to show latest errors
+            if (autoScroll) {
+                setTimeout(() => {
+                    terminalContent.scrollTop = terminalContent.scrollHeight;
+                }, 100);
             }
+        }
+
+        // Load stats for current container
+        async function loadStats() {
+            if (!currentContainer) return;
+            
+            try {
+                const response = await fetch('/api/containers/stats');
+                const result = await response.json();
+                const stats = result.data || {};
+                const containerStats = stats[currentContainer] || {};
+                
+                const statsGrid = document.getElementById('statsGrid');
+                statsGrid.innerHTML = `
+                    <div class="stat-item">
+                        <div class="stat-label">Status</div>
+                        <div class="stat-value">${containerStats.status || 'Unknown'}</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-label">CPU Usage</div>
+                        <div class="stat-value">${(containerStats.cpu_percent || 0).toFixed(1)}%</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-label">Memory Usage</div>
+                        <div class="stat-value">${(containerStats.memory_percent || 0).toFixed(1)}%</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-label">Memory</div>
+                        <div class="stat-value">${formatBytes(containerStats.memory_bytes || 0)}</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-label">Uptime</div>
+                        <div class="stat-value">${formatUptime(containerStats.uptime_seconds || 0)}</div>
+                    </div>
+                `;
+            } catch (error) {
+                console.error('Error loading stats:', error);
+            }
+        }
+
+        // Extract the actual error message without timestamps for grouping
+        function extractErrorMessage(rawMessage) {
+            // Remove common timestamp patterns from the beginning of messages
+            return rawMessage
+                .replace(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:,\d+)?\s*/, '') // Remove "2025-11-21 13:35:08,011"
+                .replace(/^\[\d{1,2}\/\d{1,2}\/\d{4}, \d{1,2}:\d{2}:\d{2} (?:AM|PM)\]\s*/, '') // Remove "[11/21/2025, 1:35:08 PM]"
+                .replace(/^\d{2}:\d{2}:\d{2}\s*/, '') // Remove "13:35:08"
+                .trim();
         }
 
         // Determine log level for coloring
@@ -617,6 +672,7 @@
 
         // Terminal controls
         function clearTerminal() {
+            allLoadedLogs = [];
             document.getElementById('terminalContent').innerHTML = '<div class="empty-terminal">Terminal cleared</div>';
             currentOffset = 0;
             hasMoreLogs = true;
@@ -630,7 +686,7 @@
 
         function refreshLogs() {
             if (currentContainer) {
-                loadLogs();
+                loadInitialLogs();
             }
         }
 
