@@ -41,6 +41,7 @@ def get_docker_client():
 
 def process_container_errors(container_name: str):
     """Read stderr and save new errors to database with reconnection logic"""
+    logger.info(f"Starting error monitoring for container: {container_name}")
     retry_delay = 5
     max_retry_delay = 60
     last_container_id = None
@@ -54,50 +55,60 @@ def process_container_errors(container_name: str):
                 retry_delay = min(retry_delay * 2, max_retry_delay)
                 continue
 
-            container = docker_client.containers.get(container_name)
-            current_container_id = container.id
+            try:
+                container = docker_client.containers.get(container_name)
+                current_container_id = container.id
 
-            # Check if container was recreated
-            if last_container_id and last_container_id != current_container_id:
-
-                # We'll continue with the new container
-                last_container_id = current_container_id
-
-            # Check if container is running
-            container.reload()
-            if container.status != "running":
-
-                break
-
-            # Reset retry delay on successful connection
-            retry_delay = 5
-
-            # Get logs from the beginning when container is recreated
-            # This ensures we don't miss any logs after recreation
-            since_timestamp = int(datetime.now().timestamp())  # Start from beginning
-            logs = container.logs(
-                stdout=False,
-                stderr=True,
-                stream=True,
-                since=since_timestamp,
-                follow=True,
-            )
-
-            for log_chunk in logs:
-                if shutdown_event.is_set():
-                    break
-
-                try:
-                    error = log_chunk.decode("utf-8").strip()
-                    if error:
-                        db.save_error(container_name, error)
-                except Exception as e:
-                    logger.error(
-                        f"Error processing log chunk for {container_name}: {e}"
+                # Check if container was recreated
+                if last_container_id and last_container_id != current_container_id:
+                    logger.info(
+                        f"Container {container_name} was recreated (ID changed from {last_container_id[:12]} to {current_container_id[:12]}), continuing monitoring"
                     )
 
-        except NotFound:
-            break
+                last_container_id = current_container_id
+
+                # Check if container is running
+                container.reload()
+                if container.status != "running":
+                    logger.info(
+                        f"Container {container_name} is not running (status: {container.status}), waiting..."
+                    )
+                    shutdown_event.wait(30)  # Wait 30 seconds and check again
+                    continue
+
+                # Reset retry delay on successful connection
+                retry_delay = 5
+
+                # Only get logs from now
+                since_timestamp = int(datetime.now().timestamp())
+
+                logs = container.logs(
+                    stdout=False,
+                    stderr=True,
+                    stream=True,
+                    since=since_timestamp,
+                    follow=True,
+                )
+
+                for log_chunk in logs:
+                    if shutdown_event.is_set():
+                        break
+
+                    try:
+                        error = log_chunk.decode("utf-8").strip()
+                        if error:
+                            db.save_error(container_name, error)
+                    except Exception as e:
+                        logger.error(
+                            f"Error processing log chunk for {container_name}: {e}"
+                        )
+
+            except NotFound:
+                logger.info(
+                    f"Container {container_name} no longer exists, stopping monitoring"
+                )
+                break
+
         except APIError as e:
             logger.error(f"Docker API error for {container_name}: {e}")
             shutdown_event.wait(retry_delay)
@@ -111,6 +122,8 @@ def process_container_errors(container_name: str):
     with container_threads_lock:
         if container_name in container_threads:
             del container_threads[container_name]
+
+    logger.info(f"Stopped error monitoring for container: {container_name}")
 
 
 def start_container_monitoring(container_name: str):
@@ -148,29 +161,38 @@ def sync_container_monitoring():
         return
 
     try:
+        # Get current running containers with their actual container IDs
         running_containers = {}
         for container in docker_client.containers.list():
-            running_containers[container.name] = container.id  # Store both name and ID
+            running_containers[container.name] = container.id
 
         with container_threads_lock:
-            # Stop monitoring containers that no longer exist OR have different IDs
+            # Stop monitoring containers that no longer exist
             monitored_containers = set(container_threads.keys())
+
+            # Check each monitored container
             for container_name in list(
                 monitored_containers
             ):  # Use list to avoid modification during iteration
                 if container_name not in running_containers:
-
+                    logger.info(
+                        f"Container {container_name} no longer exists, stopping monitoring"
+                    )
                     stop_container_monitoring(container_name)
                 else:
-                    # Check if we need to restart monitoring (container was recreated)
-                    current_thread = container_threads[container_name]
-                    if not current_thread.is_alive():
-
+                    # Check if the monitoring thread is still alive
+                    thread = container_threads[container_name]
+                    if not thread.is_alive():
+                        logger.info(
+                            f"Monitoring thread for {container_name} died, restarting"
+                        )
                         stop_container_monitoring(container_name)
                         start_container_monitoring(container_name)
 
             # Start monitoring new containers
-            for container_name in set(running_containers.keys()) - monitored_containers:
+            current_monitored = set(container_threads.keys())
+            for container_name in set(running_containers.keys()) - current_monitored:
+                logger.info(f"New container detected: {container_name}")
                 start_container_monitoring(container_name)
 
     except Exception as e:
@@ -300,78 +322,98 @@ def get_container_stats():
         logger.debug(f"Fetching stats for {len(containers)} containers")
 
         for container in containers:
+            container_name = container.name
             try:
-                cm = container.name
+                # Get container status with error handling for removed containers
+                try:
+                    container.reload()
+                    status = container.status
 
-                # Get container status
-                container.reload()
-                status = container.status
+                    # Get uptime
+                    started_at = container.attrs.get("State", {}).get("StartedAt", "")
+                    uptime_seconds = 0
+                    if started_at:
+                        try:
+                            start_time = datetime.fromisoformat(
+                                started_at.replace("Z", "+00:00")
+                            )
+                            uptime_seconds = (
+                                datetime.now(start_time.tzinfo) - start_time
+                            ).total_seconds()
+                        except Exception:
+                            pass
 
-                # Get uptime
-                started_at = container.attrs.get("State", {}).get("StartedAt", "")
-                uptime_seconds = 0
-                if started_at:
-                    try:
-                        start_time = datetime.fromisoformat(
-                            started_at.replace("Z", "+00:00")
-                        )
-                        uptime_seconds = (
-                            datetime.now(start_time.tzinfo) - start_time
-                        ).total_seconds()
-                    except Exception:
-                        pass
+                    # Get real-time stats (only if running)
+                    cpu_percent = 0
+                    memory_usage = 0
+                    memory_limit = 0
+                    memory_percent = 0
 
-                # Get real-time stats (only if running)
-                cpu_percent = 0
-                memory_usage = 0
-                memory_limit = 0
-                memory_percent = 0
+                    if status == "running":
+                        try:
+                            stats = container.stats(stream=False)
 
-                if status == "running":
-                    stats = container.stats(stream=False)
+                            # CPU calculation
+                            cpu_delta = (
+                                stats["cpu_stats"]["cpu_usage"]["total_usage"]
+                                - stats["precpu_stats"]["cpu_usage"]["total_usage"]
+                            )
+                            system_delta = (
+                                stats["cpu_stats"]["system_cpu_usage"]
+                                - stats["precpu_stats"]["system_cpu_usage"]
+                            )
+                            num_cpus = stats["cpu_stats"].get("online_cpus", 1)
+                            cpu_percent = (
+                                (cpu_delta / system_delta) * num_cpus * 100.0
+                                if system_delta > 0
+                                else 0
+                            )
 
-                    # CPU calculation
-                    cpu_delta = (
-                        stats["cpu_stats"]["cpu_usage"]["total_usage"]
-                        - stats["precpu_stats"]["cpu_usage"]["total_usage"]
+                            # Memory calculation
+                            memory_usage = stats["memory_stats"].get("usage", 0)
+                            memory_limit = stats["memory_stats"].get("limit", 0)
+                            memory_percent = (
+                                (memory_usage / memory_limit) * 100.0
+                                if memory_limit > 0
+                                else 0
+                            )
+                        except Exception as e:
+                            logger.warning(
+                                f"Error getting detailed stats for {container_name}: {e}"
+                            )
+                            # Continue with basic stats
+
+                    container_stats[container_name] = {
+                        "status": status,
+                        "uptime_seconds": int(uptime_seconds),
+                        "memory_bytes": memory_usage,
+                        "memory_limit_bytes": memory_limit,
+                        "memory_percent": round(memory_percent, 2),
+                        "cpu_percent": round(cpu_percent, 2),
+                    }
+
+                    logger.debug(
+                        f"Got stats for {container_name}: CPU={cpu_percent:.1f}%, Mem={memory_percent:.1f}%"
                     )
-                    system_delta = (
-                        stats["cpu_stats"]["system_cpu_usage"]
-                        - stats["precpu_stats"]["system_cpu_usage"]
-                    )
-                    num_cpus = stats["cpu_stats"].get("online_cpus", 1)
-                    cpu_percent = (
-                        (cpu_delta / system_delta) * num_cpus * 100.0
-                        if system_delta > 0
-                        else 0
-                    )
 
-                    # Memory calculation
-                    memory_usage = stats["memory_stats"].get("usage", 0)
-                    memory_limit = stats["memory_stats"].get("limit", 0)
-                    memory_percent = (
-                        (memory_usage / memory_limit) * 100.0 if memory_limit > 0 else 0
+                except NotFound:
+                    logger.warning(
+                        f"Container {container_name} no longer exists, skipping"
                     )
-
-                container_stats[cm] = {
-                    "status": status,
-                    "uptime_seconds": int(uptime_seconds),
-                    "memory_bytes": memory_usage,
-                    "memory_limit_bytes": memory_limit,
-                    "memory_percent": round(memory_percent, 2),
-                    "cpu_percent": round(cpu_percent, 2),
-                }
-
-                logger.debug(
-                    f"Got stats for {cm}: CPU={cpu_percent:.1f}%, Mem={memory_percent:.1f}%"
-                )
+                    container_stats[container_name] = {
+                        "status": "removed",
+                        "error": "Container no longer exists",
+                    }
+                    continue
 
             except Exception as e:
-                logger.error(f"Error getting stats for {container.name}: {e}")
-                container_stats[container.name] = {
+                logger.error(f"Error getting stats for {container_name}: {e}")
+                container_stats[container_name] = {
                     "status": "error",
                     "error": str(e),
                 }
+
+        logger.info(f"Successfully fetched stats for {len(container_stats)} containers")
 
     except Exception as e:
         logger.error(f"Error getting container stats: {e}", exc_info=True)

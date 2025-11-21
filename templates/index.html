@@ -467,7 +467,7 @@
                     displayAllLogs();
                 }
                 
-                hasMoreLogs = pagination.has_prev || false;
+                hasMoreLogs = pagination.has_next || false;
                 updateLoadOlderButton();
                 
             } catch (error) {
@@ -536,7 +536,7 @@
                 
                 allLoadedLogs = errors;
                 currentOffset = 0;
-                hasMoreLogs = pagination.has_prev || false;
+                hasMoreLogs = pagination.has_next || false;
                 
                 displayAllLogs();
                 updateLoadOlderButton();
