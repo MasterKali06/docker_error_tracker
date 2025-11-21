@@ -1,7 +1,7 @@
 import logging
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 import docker
 from docker.errors import APIError, NotFound
@@ -73,7 +73,7 @@ def process_container_errors(container_name: str):
                     logger.info(
                         f"Container {container_name} is not running (status: {container.status}), waiting..."
                     )
-                    shutdown_event.wait(30)  # Wait 30 seconds and check again
+                    shutdown_event.wait(10)  # Check more frequently (was 30 seconds)
                     continue
 
                 # Reset retry delay on successful connection
@@ -105,9 +105,24 @@ def process_container_errors(container_name: str):
 
             except NotFound:
                 logger.info(
-                    f"Container {container_name} no longer exists, stopping monitoring"
+                    f"Container {container_name} not found, checking if it was recreated..."
                 )
-                break
+                # Wait a bit and check if container exists with same name but different ID
+                shutdown_event.wait(5)
+
+                try:
+                    docker_client = get_docker_client()
+                    if docker_client:
+                        new_container = docker_client.containers.get(container_name)
+                        logger.info(
+                            f"Container {container_name} found again, continuing monitoring"
+                        )
+                        continue
+                except NotFound:
+                    logger.info(
+                        f"Container {container_name} no longer exists, stopping monitoring"
+                    )
+                    break
 
         except APIError as e:
             logger.error(f"Docker API error for {container_name}: {e}")
@@ -171,9 +186,7 @@ def sync_container_monitoring():
             monitored_containers = set(container_threads.keys())
 
             # Check each monitored container
-            for container_name in list(
-                monitored_containers
-            ):  # Use list to avoid modification during iteration
+            for container_name in list(monitored_containers):
                 if container_name not in running_containers:
                     logger.info(
                         f"Container {container_name} no longer exists, stopping monitoring"
@@ -218,7 +231,7 @@ def process_all_containers():
 
 def poll_stats_continuously():
     """Background thread that polls stats every N seconds"""
-    poll_interval = 30  # Reduced from 30 to 10 seconds for faster detection
+    poll_interval = 15  # More frequent polling for faster restart detection
 
     while not shutdown_event.is_set():
         try:
@@ -329,19 +342,41 @@ def get_container_stats():
                     container.reload()
                     status = container.status
 
-                    # Get uptime
+                    # Get uptime - FIXED
                     started_at = container.attrs.get("State", {}).get("StartedAt", "")
                     uptime_seconds = 0
                     if started_at:
                         try:
+                            # Parse Docker's ISO timestamp format
+                            # Docker returns timestamps like: "2025-01-21T13:35:08.123456789Z"
+                            # Remove nanoseconds if present and parse
+                            if "." in started_at:
+                                # Split at the decimal point
+                                date_part, frac_part = started_at.split(".")
+                                # Keep only microseconds (first 6 digits after decimal)
+                                microseconds = frac_part[:6]
+                                # Reconstruct with proper format
+                                started_at_clean = f"{date_part}.{microseconds}Z"
+                            else:
+                                started_at_clean = started_at
+
+                            # Parse the timestamp
                             start_time = datetime.fromisoformat(
-                                started_at.replace("Z", "+00:00")
+                                started_at_clean.replace("Z", "+00:00")
                             )
-                            uptime_seconds = (
-                                datetime.now(start_time.tzinfo) - start_time
-                            ).total_seconds()
-                        except Exception:
-                            pass
+
+                            # Calculate uptime using UTC timezone
+                            now = datetime.now(timezone.utc)
+                            uptime_seconds = (now - start_time).total_seconds()
+
+                            logger.debug(
+                                f"Container {container_name} uptime: {uptime_seconds}s"
+                            )
+                        except Exception as e:
+                            logger.warning(
+                                f"Error parsing timestamp for {container_name}: {e}, raw: {started_at}"
+                            )
+                            uptime_seconds = 0
 
                     # Get real-time stats (only if running)
                     cpu_percent = 0
@@ -393,7 +428,7 @@ def get_container_stats():
                     }
 
                     logger.debug(
-                        f"Got stats for {container_name}: CPU={cpu_percent:.1f}%, Mem={memory_percent:.1f}%"
+                        f"Got stats for {container_name}: CPU={cpu_percent:.1f}%, Mem={memory_percent:.1f}%, Uptime={uptime_seconds:.0f}s"
                     )
 
                 except NotFound:
